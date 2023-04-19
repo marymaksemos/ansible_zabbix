@@ -1,0 +1,288 @@
+- hosts: all
+  become: true
+  
+  tasks:
+    - name: Update apt repo and cache on all ubuntu
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+        force_apt_get: true
+
+
+    - name: Check if a reboot is needed on all servers
+      register: reboot_required_file
+      stat:
+        path: /var/run/reboot-required
+        get_md5: no
+    
+
+- hosts: server-mary
+  become: true
+  vars:
+     zabbix_version: "6.4"
+     db_name: zabbix
+     db_user: zabbix
+     db_password: mary
+     mysql_password: mary
+     mysql_user: zabbix
+     mysql_database: zabbix
+     zabbix_script_path: "/usr/share/zabbix-sql-scripts/mysql/server.sql.gz"
+  tasks:
+
+    
+    - name: Install Zabbix repository key
+      apt_key:
+         url: https://repo.zabbix.com/zabbix-official-repo.key
+         state: present 
+
+    - name: Add Zabbix repository
+      apt_repository:
+        repo: "deb https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu/ focal main"
+        state: present
+        filename: zabbix.list
+    
+    - name: Add Zabbix GPG key
+      apt_key:
+        url: https://repo.zabbix.com/zabbix-official-repo.key
+        state: present
+
+    - name: Install Zabbix repository key
+      apt_key:
+         url: https://repo.zabbix.com/zabbix-official-repo.key
+         state: present    
+
+    - name: Download Zabbix repository
+      get_url:
+        url: "https://repo.zabbix.com/zabbix/6.4/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.4-1+ubuntu22.04_all.deb"
+        dest: "/tmp/zabbix-release_6.4-1+ubuntu22.04_all.deb"
+    
+    - name: Install Zabbix release package
+      apt:
+        deb: /tmp/zabbix-release_6.4-1+ubuntu22.04_all.deb
+        state: present   
+    - name: Update package list
+      apt:
+        update_cache: yes
+
+    - name: Install required packages
+      apt:
+        name:
+          - zabbix-server-mysql
+          - zabbix-frontend-php
+          - zabbix-apache-conf
+          - zabbix-sql-scripts
+          - zabbix-agent
+        state: present
+
+    - name: Install packages
+      apt:
+        name: ['apache2', 'mysql-server', 'mysql-client', 'php', 'php-mysql', 'libapache2-mod-php']
+        state: present
+
+    - name: Start and enable apache2
+      systemd:
+         name: apache2
+         state: started
+         enabled: yes
+
+    - name: Start and enable mysql
+      systemd:
+        name: mysql
+        state: started
+        enabled: yes
+    
+    - name: Install MySQL server and dependencies
+      apt:
+       name:
+         - mysql-server
+         - libmysqlclient-dev
+         - python3-dev
+         - python3-pip
+       state: present  
+
+    - name: Install MySQL Python library
+      become: yes
+      pip:
+        name: pymysql
+        executable: pip3
+ 
+    
+   
+    
+    # - name : login database
+    #   shell:  mysql
+
+    - name: Create new database
+      shell: mysql -e "create database zabbix character set utf8mb4 collate utf8mb4_bin;"
+
+    - name: Create Zabbix Database User
+      shell: mysql -e "CREATE USER 'zabbix'@'localhost' IDENTIFIED BY 'mary';"
+    - name: grant all privileges
+      shell: mysql -e "grant all privileges on zabbix.* to zabbix@localhost;"
+
+    - name: Enable trust function creators
+      shell: mysql -e "set global log_bin_trust_function_creators = 1;"
+
+    
+
+    
+    - name: Import Zabbix schema and data
+      ansible.builtin.shell: 
+         "zcat {{ zabbix_script_path | quote }} | mysql -u {{ mysql_user }} -p{{ mysql_password }} --default-character-set=utf8mb4 {{ mysql_database }}"
+      
+
+    
+    - name: Disable trust function creators
+      shell: mysql -e "set global log_bin_trust_function_creators = 0;"
+
+
+        
+    - name: Configure database for Zabbix server
+      become: true
+      lineinfile:
+          path: /etc/zabbix/zabbix_server.conf
+          regexp: "^DBPassword=.*"
+          line: "DBPassword=mary"
+          state: present 
+    
+    - name: Restart Zabbix server, Apache and Zabbix agent
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+          - zabbix-server
+          - apache2
+          - zabbix-agent
+
+    - name: Enable Zabbix agent on boot
+      ansible.builtin.systemd:
+         name: "{{ item }}"
+         state: started
+         enabled: true
+      loop:
+          - zabbix-agent
+          - apache2
+          - zabbix-agent
+
+    - name: Set up firewall
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      with_items:
+       - 80
+       - 443
+       - 10050
+       - 10051      
+
+    - name: List remote Grafana plugins
+      environment:
+        PATH: "{{ ansible_env.PATH }}:/usr/sbin/grafana/bin/"
+      command: grafana-cli plugins list-remote
+
+
+         
+    - name: Install Zabbix app plugin in Grafana
+      command: grafana-cli plugins install alexanderzobnin-zabbix-app
+
+    - name: Restart Grafana server
+      systemd:
+        name: grafana-server
+        state: restarted
+
+
+    
+- hosts: api-mary
+  become: true
+  vars:
+    zabbix_version: "6.4"
+  tasks:
+    - name: Install Zabbix repository key
+      apt_key:
+         url: https://repo.zabbix.com/zabbix-official-repo.key
+         state: present 
+
+    - name: Add Zabbix repository
+      apt_repository:
+        repo: "deb https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu/ focal main"
+        state: present
+        filename: zabbix.list
+    
+    - name: Add Zabbix GPG key
+      apt_key:
+        url: https://repo.zabbix.com/zabbix-official-repo.key
+        state: present
+
+    - name: Install Zabbix repository key
+      apt_key:
+         url: https://repo.zabbix.com/zabbix-official-repo.key
+         state: present    
+
+    - name: Download Zabbix repository
+      get_url:
+        url: "https://repo.zabbix.com/zabbix/6.4/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.4-1+ubuntu22.04_all.deb"
+        dest: "/tmp/zabbix-release_6.4-1+ubuntu22.04_all.deb"
+    
+    - name: Install Zabbix release package
+      apt:
+        deb: /tmp/zabbix-release_6.4-1+ubuntu22.04_all.deb
+        state: present   
+    - name: Update package list
+      apt:
+        update_cache: yes
+
+    - name: Install Zabbix agent 2 and plugins
+      apt:
+       name:
+        - zabbix-agent2
+        - zabbix-agent2-plugin-*
+       state: present
+       update_cache: yes
+
+    - name: Change zabbix_agent2.conf Hostname
+      ansible.builtin.lineinfile:
+         path: /etc/zabbix/zabbix_agent2.conf
+         regexp: '^Hostname=*'
+         line: "Hostname=zabbix sever"
+         state: present
+
+    - name: Change zabbix_agent2.conf Server
+      ansible.builtin.lineinfile:
+          path: /etc/zabbix/zabbix_agent2.conf
+          regexp: '^Server='
+          line: "Server=65.109.235.176"
+          state: present
+    
+
+    - name: Change zabbix_agent2.conf ServerActive
+      ansible.builtin.lineinfile:
+          path: /etc/zabbix/zabbix_agent2.conf
+          line: "ServerActive=65.109.235.176"
+          state: present
+      
+
+
+    - name: Restart Zabbix agent2
+      ansible.builtin.systemd:
+        name: zabbix-agent2
+        state: restarted
+      
+    - name: Enable Zabbix agent2
+      ansible.builtin.systemd:
+        name: zabbix-agent2
+        state: started
+        enabled: true
+
+    - name: Set up firewall
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      with_items:
+       - 80
+       - 443
+       - 10050
+       - 10051     
+
+
+
